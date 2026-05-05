@@ -66,16 +66,60 @@ async function handleProxy(request: NextRequest): Promise<NextResponse> {
       reqHeaders.set(key, value);
     }
   }
-  // Set the correct Host for the target origin
+
+  // Rewrite headers that would reveal the proxy's origin to Cloudflare / WAFs.
+  // Without this, sec-fetch-site=cross-site + a proxy Referer triggers 403s.
+
+  // Host must match the target
   reqHeaders.set("host", target.host);
-  // Pretend to be a normal browser
+
+  // Referer: rewrite our proxy URL back to the upstream page URL
+  const rawReferer = request.headers.get("referer");
+  if (rawReferer) {
+    try {
+      const proxiedUrl = new URL(rawReferer).searchParams.get("url");
+      if (proxiedUrl) {
+        reqHeaders.set("referer", proxiedUrl);
+      } else {
+        // Referer is not a proxy URL — make it look like it comes from the upstream origin
+        reqHeaders.set("referer", target.origin + "/");
+      }
+    } catch {
+      reqHeaders.delete("referer");
+    }
+  }
+
+  // Origin: replace our proxy origin with the upstream origin
+  if (reqHeaders.has("origin")) {
+    reqHeaders.set("origin", target.origin);
+  }
+
+  // sec-fetch-site: resources loaded from the upstream origin by the upstream
+  // page are same-origin fetches; cross-site is a clear proxy signal.
+  if (reqHeaders.has("sec-fetch-site")) {
+    reqHeaders.set("sec-fetch-site", "same-origin");
+  }
+
+  // Ensure a realistic User-Agent
   if (!reqHeaders.has("user-agent")) {
     reqHeaders.set(
       "user-agent",
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     );
   }
-  reqHeaders.set("accept-encoding", "identity"); // Prevent compressed responses we can't easily decode
+
+  // Add baseline browser headers if absent
+  if (!reqHeaders.has("accept")) {
+    reqHeaders.set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8");
+  }
+  if (!reqHeaders.has("accept-language")) {
+    reqHeaders.set("accept-language", "en-US,en;q=0.9");
+  }
+
+  // Remove accept-encoding override — Node 18's fetch (undici) negotiates
+  // gzip/brotli automatically and decompresses transparently, so we no longer
+  // need to force identity.  Sending identity is itself a bot signal.
+  reqHeaders.delete("accept-encoding");
 
   // Body for non-GET/HEAD requests
   let body: ArrayBuffer | undefined;
