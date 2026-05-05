@@ -127,6 +127,13 @@ async function handleProxy(request: NextRequest): Promise<NextResponse> {
   resHeaders.set("access-control-allow-origin", "*");
   resHeaders.delete("x-frame-options");
 
+  // ── No-body statuses (1xx, 204, 304) ─────────────────────────────────────
+  // The HTTP spec forbids a message body for these; NextResponse throws if you pass one.
+  const NO_BODY_STATUSES = new Set([101, 204, 205, 304]);
+  if (NO_BODY_STATUSES.has(res.status) || res.status < 200) {
+    return new NextResponse(null, { status: res.status, headers: resHeaders });
+  }
+
   // ── HTML ──────────────────────────────────────────────────────────────────
   if (contentType.includes("text/html")) {
     const html = await res.text();
