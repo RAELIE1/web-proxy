@@ -228,41 +228,36 @@ async function handleProxy(request: NextRequest): Promise<NextResponse> {
     //
     // Fix: replace import.meta.url with the original upstream URL string so
     // relative paths are resolved against the correct chess.com directory.
-    js = js.replaceAll("import.meta.url", JSON.stringify(finalUrl));
+    // Fast-path: only scan/replace if the token is actually present
+    if (js.includes("import.meta.url")) {
+      js = js.replaceAll("import.meta.url", JSON.stringify(finalUrl));
+    }
 
     // Also patch __webpack_public_path__ / __vite_public_path__ globals that
     // some older bundles set explicitly to location.origin + '/'.
-    // We replace the assignment target so the bundler uses the correct base.
-    js = js.replace(
-      /\b(__webpack_public_path__|__vite_public_path__)\s*=\s*(['"`])([^'"`]*)\2/g,
-      (match, varName, quote, path) => {
-        try {
-          // Make the path absolute against the upstream origin
-          const abs = new URL(path || "/", finalUrl).href;
-          return `${varName}=${JSON.stringify(abs)}`;
-        } catch {
-          return match;
+    if (js.includes("__webpack_public_path__") || js.includes("__vite_public_path__")) {
+      js = js.replace(
+        /\b(__webpack_public_path__|__vite_public_path__)\s*=\s*(['"`])([^'"`]*)\2/g,
+        (match, varName, _quote, path) => {
+          try {
+            const abs = new URL(path || "/", finalUrl).href;
+            return `${varName}=${JSON.stringify(abs)}`;
+          } catch {
+            return match;
+          }
         }
-      }
-    );
+      );
+    }
 
     return new NextResponse(js, { status: res.status, headers: resHeaders });
   }
 
-  // ── JSON / XML / SVG (text-based) ─────────────────────────────────────────
-  if (
-    contentType.includes("application/json") ||
-    contentType.includes("application/xml") ||
-    contentType.includes("text/xml") ||
-    contentType.includes("image/svg+xml")
-  ) {
-    const text = await res.arrayBuffer();
-    return new NextResponse(text, { status: res.status, headers: resHeaders });
-  }
-
-  // ── Binary (images, fonts, audio, video, wasm, etc.) ─────────────────────
-  const binary = await res.arrayBuffer();
-  return new NextResponse(binary, { status: res.status, headers: resHeaders });
+  // ── Everything else: stream directly, no buffering ───────────────────────
+  // JSON, XML, SVG, images, fonts, audio, video, wasm, etc. need no rewriting.
+  // Passing res.body (a ReadableStream) avoids loading the whole asset into
+  // memory before the first byte reaches the browser — critical for large images,
+  // fonts, and video segments.
+  return new NextResponse(res.body, { status: res.status, headers: resHeaders });
 }
 
 function errorPage(
