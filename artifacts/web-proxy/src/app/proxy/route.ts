@@ -226,11 +226,20 @@ async function handleProxy(request: NextRequest): Promise<NextResponse> {
     // so '.' strips back to the proxy root and all chunks load from '/'
     // (which chess.com returns 403/404 for).
     //
-    // Fix: replace import.meta.url with the original upstream URL string so
-    // relative paths are resolved against the correct chess.com directory.
-    // Fast-path: only scan/replace if the token is actually present
+    // Fix: replace import.meta.url so relative chunk paths resolve against the
+    // correct upstream directory instead of the proxy root.
+    //
+    // IMPORTANT: we replace with a variable name, NOT JSON.stringify(url).
+    // JSON.stringify produces "https://..." (with embedded quotes).  If the
+    // token appears inside an existing string literal in the source —
+    // e.g.  var msg = "uses import.meta.url for resolution"  — inserting
+    // quoted content breaks out of the enclosing string and produces a
+    // "missing }" / "unexpected token" parse error.  A bare identifier is
+    // syntactically valid in any position, so it never breaks the file.
     if (js.includes("import.meta.url")) {
-      js = js.replaceAll("import.meta.url", JSON.stringify(finalUrl));
+      const imuVar = "__proxy_imu__";
+      js = `var ${imuVar}=${JSON.stringify(finalUrl)};` +
+           js.replaceAll("import.meta.url", imuVar);
     }
 
     // Also patch __webpack_public_path__ / __vite_public_path__ globals that
