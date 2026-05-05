@@ -127,6 +127,17 @@ async function handleProxy(request: NextRequest): Promise<NextResponse> {
   resHeaders.set("access-control-allow-origin", "*");
   resHeaders.delete("x-frame-options");
 
+  // Track the proxied origin in a cookie so the middleware can redirect
+  // root-relative asset requests even when there is no Referer header
+  // (e.g. dynamic import(), web workers).
+  try {
+    const proxiedOrigin = new URL(finalUrl).origin;
+    resHeaders.append(
+      "set-cookie",
+      `__proxy_origin=${encodeURIComponent(proxiedOrigin)}; Path=/; SameSite=Lax`
+    );
+  } catch { /* ignore malformed URLs */ }
+
   // ── No-body statuses (1xx, 204, 304) ─────────────────────────────────────
   // The HTTP spec forbids a message body for these; NextResponse throws if you pass one.
   const NO_BODY_STATUSES = new Set([101, 204, 205, 304]);
@@ -157,14 +168,40 @@ async function handleProxy(request: NextRequest): Promise<NextResponse> {
   }
 
   // ── JavaScript ────────────────────────────────────────────────────────────
-  // We pass JS through as-is. Rewriting JS statically is complex and error-prone;
-  // the injected runtime interceptor handles dynamic URL calls instead.
   if (
     contentType.includes("javascript") ||
     contentType.includes("application/x-javascript") ||
     contentType.includes("application/ecmascript")
   ) {
-    const js = await res.arrayBuffer();
+    let js = await res.text();
+
+    // Vite/Rolldown bundles compute their chunk publicPath via:
+    //   new URL('.', import.meta.url).href
+    // When the script is served through our proxy, import.meta.url resolves
+    // to the proxy URL (e.g. /proxy?url=https://chess.com/bundles/…/runtime.js),
+    // so '.' strips back to the proxy root and all chunks load from '/'
+    // (which chess.com returns 403/404 for).
+    //
+    // Fix: replace import.meta.url with the original upstream URL string so
+    // relative paths are resolved against the correct chess.com directory.
+    js = js.replaceAll("import.meta.url", JSON.stringify(finalUrl));
+
+    // Also patch __webpack_public_path__ / __vite_public_path__ globals that
+    // some older bundles set explicitly to location.origin + '/'.
+    // We replace the assignment target so the bundler uses the correct base.
+    js = js.replace(
+      /\b(__webpack_public_path__|__vite_public_path__)\s*=\s*(['"`])([^'"`]*)\2/g,
+      (match, varName, quote, path) => {
+        try {
+          // Make the path absolute against the upstream origin
+          const abs = new URL(path || "/", finalUrl).href;
+          return `${varName}=${JSON.stringify(abs)}`;
+        } catch {
+          return match;
+        }
+      }
+    );
+
     return new NextResponse(js, { status: res.status, headers: resHeaders });
   }
 

@@ -23,25 +23,37 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Try to recover the proxied origin from the Referer header
+  // ── Strategy 1: recover origin from Referer header ───────────────────────
+  // Referer looks like: https://host/proxy?url=https%3A%2F%2Fchess.com%2F...
   const referer = request.headers.get("referer");
   if (referer) {
     try {
-      const ref = new URL(referer);
-      // Referer should look like: https://host/proxy?url=https%3A%2F%2Fchess.com%2F...
-      const proxiedUrl = ref.searchParams.get("url");
+      const proxiedUrl = new URL(referer).searchParams.get("url");
       if (proxiedUrl) {
         const proxiedOrigin = new URL(proxiedUrl).origin;
-        // Reconstruct the full target URL: origin + our bare path + query
         const target = new URL(pathname + search, proxiedOrigin).href;
-        const destination = new URL(request.url);
-        destination.pathname = "/proxy";
-        destination.search = "?url=" + encodeURIComponent(target);
-        return NextResponse.redirect(destination, { status: 302 });
+        const dest = new URL(request.url);
+        dest.pathname = "/proxy";
+        dest.search = "?url=" + encodeURIComponent(target);
+        return NextResponse.redirect(dest, { status: 302 });
       }
-    } catch {
-      // Referer was unparseable – fall through and let Next.js 404 normally
-    }
+    } catch { /* unparseable, fall through */ }
+  }
+
+  // ── Strategy 2: cookie-based fallback ────────────────────────────────────
+  // The proxy route sets __proxy_origin on every response so that requests
+  // arriving without a Referer (dynamic import(), web workers, importmap
+  // entries, etc.) can still be redirected correctly.
+  const cookieOrigin = request.cookies.get("__proxy_origin")?.value;
+  if (cookieOrigin) {
+    try {
+      const origin = decodeURIComponent(cookieOrigin);
+      const target = new URL(pathname + search, origin).href;
+      const dest = new URL(request.url);
+      dest.pathname = "/proxy";
+      dest.search = "?url=" + encodeURIComponent(target);
+      return NextResponse.redirect(dest, { status: 302 });
+    } catch { /* ignore */ }
   }
 
   return NextResponse.next();
