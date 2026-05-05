@@ -1,288 +1,95 @@
 import { NextRequest, NextResponse } from "next/server";
 import { rewriteHtml, rewriteCssUrls, makeProxyUrl } from "@/lib/rewrite";
+import zlib from "node:zlib";
+import { promisify } from "node:util";
+
+const gunzip = promisify(zlib.gunzip);
+const inflate = promisify(zlib.inflate);
+const brotliDecompress = promisify(zlib.brotliDecompress);
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Headers we strip from the outgoing request to the target
+// ── Pre-compiled sets — created once at module load, never recreated ───────
 const BLOCKED_REQ_HEADERS = new Set([
-  "host",
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailers",
-  "transfer-encoding",
-  "upgrade",
-  "x-forwarded-for",
-  "x-forwarded-host",
-  "x-forwarded-proto",
-  "x-forwarded-port",
-  "x-real-ip",
-  "cf-ray",
-  "cf-connecting-ip",
-  "true-client-ip",
+  "host", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+  "te", "trailers", "transfer-encoding", "upgrade",
+  "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port",
+  "x-real-ip", "cf-ray", "cf-connecting-ip", "true-client-ip",
 ]);
 
-// Headers we strip from the proxied response before sending to the browser
 const BLOCKED_RES_HEADERS = new Set([
-  "content-security-policy",
-  "content-security-policy-report-only",
-  "x-frame-options",
-  "strict-transport-security",
-  "transfer-encoding",
-  "content-encoding", // We fully decode before rewriting
-  "alt-svc",
+  "content-security-policy", "content-security-policy-report-only",
+  "x-frame-options", "strict-transport-security",
+  "transfer-encoding", "content-encoding", "content-length", "alt-svc",
 ]);
+
+const JS_PASSTHROUGH_DOMAINS = new Set([
+  "pagead2.googlesyndication.com", "adservice.google.com",
+  "ssl.p.jwpcdn.com", "cdn.jwplayer.com",
+  "mc.yandex.ru", "mc.yandex.com", "yandex.ru",
+  "cdn.jsdelivr.net", "unpkg.com",
+  "highperformanceformat.com", "chagnougroalry.net",
+  "adfox.yandex.ru", "ad.mail.ru",
+  "challenges.cloudflare.com", "cloudflare.com",
+  // ad networks on anime-sama
+  "a-zzz.com", "uchaihoo.com",
+  // Adcash — aclib.js must load unmodified so aclib.runBanner() works
+  "acscdn.com", "aclib.net", "aclibrary.net",
+]);
+
+const JS_PASSTHROUGH_PATTERNS: RegExp[] = [
+  /adsbygoogle/i, /jwplayer/i, /yandex.*metrika/i,
+  /metrika.*tag/i, /adblockdetect/i, /invoke\.js/i,
+  /banner\.js/i, /adfox/i, /googlesyndication/i,
+  /btag/i, /aclib/i,
+];
+
+const NO_BODY_STATUSES = new Set([101, 204, 205, 304]);
+
+// Standard UA — defined once
+const PROXY_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const PROXY_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
+const PROXY_ACCEPT_LANG = "en-US,en;q=0.9";
+
+// ── Decompression ──────────────────────────────────────────────────────────
+async function decompressBody(buf: Buffer, encoding: string): Promise<Buffer> {
+  const enc = encoding.trim().toLowerCase();
+  try {
+    if (enc === "gzip" || enc === "x-gzip") return await gunzip(buf) as Buffer;
+    if (enc === "deflate") return await inflate(buf) as Buffer;
+    if (enc === "br" || enc === "brotli") return await brotliDecompress(buf) as Buffer;
+  } catch { /* decompression failed — return raw */ }
+  return buf;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function isJsPassthrough(requestUrl: string, finalUrl: string): boolean {
+  for (const url of [requestUrl, finalUrl]) {
+    try {
+      if (JS_PASSTHROUGH_DOMAINS.has(new URL(url).hostname)) return true;
+    } catch { /* ignore */ }
+    if (JS_PASSTHROUGH_PATTERNS.some(p => p.test(url))) return true;
+  }
+  return false;
+}
 
 function parseTargetUrl(request: NextRequest): URL | null {
-  const { searchParams } = new URL(request.url);
-  const raw = searchParams.get("url");
+  const raw = new URL(request.url).searchParams.get("url");
   if (!raw) return null;
   try {
     const parsed = new URL(raw);
-    if (!["http:", "https:"].includes(parsed.protocol)) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
+    return ["http:", "https:"].includes(parsed.protocol) ? parsed : null;
+  } catch { return null; }
 }
 
-async function handleProxy(request: NextRequest): Promise<NextResponse> {
-  const target = parseTargetUrl(request);
-
-  if (!target) {
-    return NextResponse.json(
-      { error: "Missing or invalid `url` query parameter." },
-      { status: 400 }
-    );
-  }
-
-  // Build forwarded request headers
-  const reqHeaders = new Headers();
-  for (const [key, value] of request.headers.entries()) {
-    if (!BLOCKED_REQ_HEADERS.has(key.toLowerCase())) {
-      reqHeaders.set(key, value);
-    }
-  }
-
-  // Rewrite headers that would reveal the proxy's origin to Cloudflare / WAFs.
-  // Without this, sec-fetch-site=cross-site + a proxy Referer triggers 403s.
-
-  // Host must match the target
-  reqHeaders.set("host", target.host);
-
-  // Referer: rewrite our proxy URL back to the upstream page URL
-  const rawReferer = request.headers.get("referer");
-  if (rawReferer) {
-    try {
-      const proxiedUrl = new URL(rawReferer).searchParams.get("url");
-      if (proxiedUrl) {
-        reqHeaders.set("referer", proxiedUrl);
-      } else {
-        // Referer is not a proxy URL — make it look like it comes from the upstream origin
-        reqHeaders.set("referer", target.origin + "/");
-      }
-    } catch {
-      reqHeaders.delete("referer");
-    }
-  }
-
-  // Origin: replace our proxy origin with the upstream origin
-  if (reqHeaders.has("origin")) {
-    reqHeaders.set("origin", target.origin);
-  }
-
-  // sec-fetch-site: resources loaded from the upstream origin by the upstream
-  // page are same-origin fetches; cross-site is a clear proxy signal.
-  if (reqHeaders.has("sec-fetch-site")) {
-    reqHeaders.set("sec-fetch-site", "same-origin");
-  }
-
-  // Ensure a realistic User-Agent
-  if (!reqHeaders.has("user-agent")) {
-    reqHeaders.set(
-      "user-agent",
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    );
-  }
-
-  // Add baseline browser headers if absent
-  if (!reqHeaders.has("accept")) {
-    reqHeaders.set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8");
-  }
-  if (!reqHeaders.has("accept-language")) {
-    reqHeaders.set("accept-language", "en-US,en;q=0.9");
-  }
-
-  // Remove accept-encoding override — Node 18's fetch (undici) negotiates
-  // gzip/brotli automatically and decompresses transparently, so we no longer
-  // need to force identity.  Sending identity is itself a bot signal.
-  reqHeaders.delete("accept-encoding");
-
-  // Body for non-GET/HEAD requests
-  let body: ArrayBuffer | undefined;
-  if (!["GET", "HEAD"].includes(request.method)) {
-    body = await request.arrayBuffer();
-  }
-
-  let res: Response;
-  try {
-    res = await fetch(target.href, {
-      method: request.method,
-      headers: reqHeaders,
-      body: body ?? null,
-      redirect: "follow", // Next.js/Node fetch follows redirects and we get the final URL via res.url
-      signal: AbortSignal.timeout(25_000),
-    });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Unknown fetch error";
-    return errorPage(
-      502,
-      "Upstream Error",
-      `Could not reach ${target.origin}: ${message}`,
-      target.href
-    );
-  }
-
-  const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
-  const finalUrl = res.url || target.href; // After redirects
-
-  // Build response headers
-  const resHeaders = new Headers();
-  for (const [key, value] of res.headers.entries()) {
-    if (!BLOCKED_RES_HEADERS.has(key.toLowerCase())) {
-      resHeaders.set(key, value);
-    }
-  }
-
-  // Rewrite Set-Cookie domain so cookies work
-  const cookies = res.headers.getSetCookie?.() ?? [];
-  for (const cookie of cookies) {
-    const cleaned = cookie
-      .replace(/;\s*domain=[^;]*/gi, "")
-      .replace(/;\s*secure/gi, "")
-      .replace(/;\s*samesite=[^;]*/gi, "");
-    resHeaders.append("set-cookie", cleaned);
-  }
-
-  // Open up for embedding
-  resHeaders.set("access-control-allow-origin", "*");
-  resHeaders.delete("x-frame-options");
-
-  // Track the proxied origin in a cookie so the middleware can redirect
-  // root-relative asset requests even when there is no Referer header
-  // (e.g. dynamic import(), web workers).
-  try {
-    const proxiedOrigin = new URL(finalUrl).origin;
-    resHeaders.append(
-      "set-cookie",
-      `__proxy_origin=${encodeURIComponent(proxiedOrigin)}; Path=/; SameSite=Lax`
-    );
-  } catch { /* ignore malformed URLs */ }
-
-  // ── No-body statuses (1xx, 204, 304) ─────────────────────────────────────
-  // The HTTP spec forbids a message body for these; NextResponse throws if you pass one.
-  const NO_BODY_STATUSES = new Set([101, 204, 205, 304]);
-  if (NO_BODY_STATUSES.has(res.status) || res.status < 200) {
-    return new NextResponse(null, { status: res.status, headers: resHeaders });
-  }
-
-  // ── HTML ──────────────────────────────────────────────────────────────────
-  if (contentType.includes("text/html")) {
-    const html = await res.text();
-    const rewritten = rewriteHtml(html, finalUrl);
-    resHeaders.set("content-type", "text/html; charset=utf-8");
-    return new NextResponse(rewritten, {
-      status: res.status,
-      headers: resHeaders,
-    });
-  }
-
-  // ── CSS ───────────────────────────────────────────────────────────────────
-  if (contentType.includes("text/css")) {
-    const css = await res.text();
-    const rewritten = rewriteCssUrls(css, finalUrl);
-    resHeaders.set("content-type", contentType);
-    return new NextResponse(rewritten, {
-      status: res.status,
-      headers: resHeaders,
-    });
-  }
-
-  // ── JavaScript ────────────────────────────────────────────────────────────
-  if (
-    contentType.includes("javascript") ||
-    contentType.includes("application/x-javascript") ||
-    contentType.includes("application/ecmascript")
-  ) {
-    let js = await res.text();
-
-    // Vite/Rolldown bundles compute their chunk publicPath via:
-    //   new URL('.', import.meta.url).href
-    // When the script is served through our proxy, import.meta.url resolves
-    // to the proxy URL (e.g. /proxy?url=https://chess.com/bundles/…/runtime.js),
-    // so '.' strips back to the proxy root and all chunks load from '/'
-    // (which chess.com returns 403/404 for).
-    //
-    // Fix: replace import.meta.url so relative chunk paths resolve against the
-    // correct upstream directory instead of the proxy root.
-    //
-    // IMPORTANT: we replace with a variable name, NOT JSON.stringify(url).
-    // JSON.stringify produces "https://..." (with embedded quotes).  If the
-    // token appears inside an existing string literal in the source —
-    // e.g.  var msg = "uses import.meta.url for resolution"  — inserting
-    // quoted content breaks out of the enclosing string and produces a
-    // "missing }" / "unexpected token" parse error.  A bare identifier is
-    // syntactically valid in any position, so it never breaks the file.
-    if (js.includes("import.meta.url")) {
-      const imuVar = "__proxy_imu__";
-      js = `var ${imuVar}=${JSON.stringify(finalUrl)};` +
-           js.replaceAll("import.meta.url", imuVar);
-    }
-
-    // Also patch __webpack_public_path__ / __vite_public_path__ globals that
-    // some older bundles set explicitly to location.origin + '/'.
-    if (js.includes("__webpack_public_path__") || js.includes("__vite_public_path__")) {
-      js = js.replace(
-        /\b(__webpack_public_path__|__vite_public_path__)\s*=\s*(['"`])([^'"`]*)\2/g,
-        (match, varName, _quote, path) => {
-          try {
-            const abs = new URL(path || "/", finalUrl).href;
-            return `${varName}=${JSON.stringify(abs)}`;
-          } catch {
-            return match;
-          }
-        }
-      );
-    }
-
-    return new NextResponse(js, { status: res.status, headers: resHeaders });
-  }
-
-  // ── Everything else: stream directly, no buffering ───────────────────────
-  // JSON, XML, SVG, images, fonts, audio, video, wasm, etc. need no rewriting.
-  // Passing res.body (a ReadableStream) avoids loading the whole asset into
-  // memory before the first byte reaches the browser — critical for large images,
-  // fonts, and video segments.
-  return new NextResponse(res.body, { status: res.status, headers: resHeaders });
-}
-
-function errorPage(
-  status: number,
-  title: string,
-  description: string,
-  targetUrl: string
-): NextResponse {
-  const proxyHome = makeProxyUrl(targetUrl, targetUrl); // just for display
-  void proxyHome; // unused
-
+// ── Error page (HTML template literal — built on demand, not cached) ───────
+function errorPage(status: number, title: string, description: string, targetUrl: string): NextResponse {
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>${status} — ${title}</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
@@ -306,37 +113,227 @@ function errorPage(
   </div>
 </body>
 </html>`;
-
-  return new NextResponse(html, {
-    status,
-    headers: { "content-type": "text/html; charset=utf-8" },
-  });
+  return new NextResponse(html, { status, headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
-export async function GET(request: NextRequest) {
-  return handleProxy(request);
+// ── Core proxy handler ────────────────────────────────────────────────────
+async function handleProxy(request: NextRequest): Promise<NextResponse> {
+  try {
+    return await _handleProxy(request);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[proxy] unhandled error:", msg);
+    return errorPage(500, "Proxy Error", msg, request.url);
+  }
 }
 
-export async function POST(request: NextRequest) {
-  return handleProxy(request);
+async function _handleProxy(request: NextRequest): Promise<NextResponse> {
+  const target = parseTargetUrl(request);
+  if (!target) {
+    return NextResponse.json({ error: "Missing or invalid `url` query parameter." }, { status: 400 });
+  }
+
+  // Block self-referential requests
+  if (target.hostname === "localhost" || target.hostname === "127.0.0.1") {
+    const isJs = (request.headers.get("accept") ?? "").includes("javascript") || target.pathname.endsWith(".js");
+    return new NextResponse(
+      isJs ? "/* proxy: self-referential JS request blocked */" : "",
+      {
+        status: 200,
+        headers: {
+          "content-type": isJs ? "text/javascript; charset=utf-8" : "text/plain",
+          "access-control-allow-origin": "*",
+        },
+      }
+    );
+  }
+
+  // ── Build outgoing request headers ────────────────────────────────────
+  const reqHeaders = new Headers();
+  for (const [key, value] of request.headers.entries()) {
+    if (!BLOCKED_REQ_HEADERS.has(key.toLowerCase())) reqHeaders.set(key, value);
+  }
+
+  reqHeaders.set("host", target.host);
+  reqHeaders.set("user-agent", PROXY_UA);
+  reqHeaders.set("accept-encoding", "identity");
+  if (!reqHeaders.has("accept")) reqHeaders.set("accept", PROXY_ACCEPT);
+  if (!reqHeaders.has("accept-language")) reqHeaders.set("accept-language", PROXY_ACCEPT_LANG);
+
+  // Strip ALL sec-fetch-* headers — we'll set only what's needed.
+  // Sending sec-fetch-dest: script can trigger bot-detection on some servers
+  // (confirmed: anime-sama returns HTML when this header is present from a
+  // non-browser IP, but serves JS fine to curl which sends no sec-fetch-*).
+  reqHeaders.delete("sec-fetch-dest");
+  reqHeaders.delete("sec-fetch-mode");
+  reqHeaders.delete("sec-fetch-site");
+  reqHeaders.delete("sec-fetch-user");
+
+  // Rewrite Referer / Origin to avoid WAF detection
+  const rawReferer = request.headers.get("referer");
+  if (rawReferer) {
+    try {
+      const proxiedUrl = new URL(rawReferer).searchParams.get("url");
+      reqHeaders.set("referer", proxiedUrl ? proxiedUrl : target.origin + "/");
+    } catch { reqHeaders.delete("referer"); }
+  }
+  if (reqHeaders.has("origin")) reqHeaders.set("origin", target.origin);
+
+  // Body for non-GET/HEAD
+  let body: ArrayBuffer | undefined;
+  if (!["GET", "HEAD"].includes(request.method)) body = await request.arrayBuffer();
+
+  // ── Fetch upstream ────────────────────────────────────────────────────
+  let res: Response;
+  try {
+    res = await fetch(target.href, {
+      method: request.method,
+      headers: reqHeaders,
+      body: body ?? null,
+      redirect: "follow",
+      signal: AbortSignal.timeout(25_000),
+      // @ts-expect-error Node-specific
+      compress: false,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown fetch error";
+    return errorPage(502, "Upstream Error", `Could not reach ${target.origin}: ${message}`, target.href);
+  }
+
+  // No-body responses
+  if (NO_BODY_STATUSES.has(res.status) || res.status < 200) {
+    const resHeaders = buildResHeaders(res, []);
+    return new NextResponse(null, { status: res.status, headers: resHeaders });
+  }
+
+  // Decompress body
+  const rawEncoding = res.headers.get("content-encoding") ?? "";
+  const rawBuf = Buffer.from(await res.arrayBuffer());
+  const bodyBuf = rawEncoding ? await decompressBody(rawBuf, rawEncoding) : rawBuf;
+
+  const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
+  const finalUrl = res.url || target.href;
+  const cookies = res.headers.getSetCookie?.() ?? [];
+  const resHeaders = buildResHeaders(res, cookies);
+
+  // Store proxy origin cookie for middleware fallback
+  try {
+    const proxiedOrigin = new URL(finalUrl).origin;
+    resHeaders.append("set-cookie", `__proxy_origin=${encodeURIComponent(proxiedOrigin)}; Path=/; SameSite=Lax`);
+  } catch { /* ignore */ }
+
+  // ── Content-type routing ───────────────────────────────────────────────
+
+  // If the upstream returned HTML but the client expected a script (e.g. the
+  // upstream sent a bot-check/error page for episodes.js), serve an empty JS
+  // comment instead of the HTML.  Without this, Next.js adds
+  // x-content-type-options: nosniff and the browser blocks it with
+  // NS_ERROR_CORRUPTED_CONTENT.
+  const requestedAsJs =
+    target.pathname.endsWith(".js") ||
+    target.pathname.endsWith(".mjs") ||
+    (request.headers.get("accept") ?? "").includes("javascript");
+
+  if (contentType.includes("text/html") && requestedAsJs) {
+    resHeaders.set("content-type", "text/javascript; charset=utf-8");
+    return new NextResponse("/* proxy: upstream returned HTML for JS request */", {
+      status: 200,
+      headers: resHeaders,
+    });
+  }
+
+  if (contentType.includes("text/html")) {
+    const rewritten = rewriteHtml(bodyBuf.toString("utf-8"), finalUrl);
+    resHeaders.set("content-type", "text/html; charset=utf-8");
+    return new NextResponse(rewritten, { status: res.status, headers: resHeaders });
+  }
+
+  if (contentType.includes("text/css")) {
+    const rewritten = rewriteCssUrls(bodyBuf.toString("utf-8"), finalUrl);
+    resHeaders.set("content-type", contentType);
+    return new NextResponse(rewritten, { status: res.status, headers: resHeaders });
+  }
+
+  if (
+    contentType.includes("javascript") ||
+    contentType.includes("application/x-javascript") ||
+    contentType.includes("application/ecmascript")
+  ) {
+    const raw = bodyBuf.toString("utf-8");
+
+    // Upstream returned HTML for a JS request (bot-check / error page)
+    if (raw.trimStart().startsWith("<")) {
+      resHeaders.set("content-type", "text/javascript; charset=utf-8");
+      return new NextResponse("/* proxy: upstream returned non-JS */", { status: 200, headers: resHeaders });
+    }
+
+    if (isJsPassthrough(target.href, finalUrl)) {
+      resHeaders.set("content-type", "text/javascript; charset=utf-8");
+      return new NextResponse(raw, { status: res.status, headers: resHeaders });
+    }
+
+    let js = raw;
+
+    // Fix import.meta.url for Vite/Rolldown chunk resolution
+    if (js.includes("import.meta.url")) {
+      const imuVar = "__proxy_imu__";
+      if (!js.includes(`var ${imuVar}`)) {
+        js = `;var ${imuVar}=${JSON.stringify(finalUrl)};\n` + js;
+      }
+      js = js.replace(/\bimport\.meta\.url\b/g, imuVar);
+    }
+
+    // Patch webpack/vite public path globals
+    if (js.includes("__webpack_public_path__") || js.includes("__vite_public_path__")) {
+      js = js.replace(
+        /\b(__webpack_public_path__|__vite_public_path__)\s*=\s*(['"`])([^'"`]*)\2/g,
+        (match, varName, _quote, path) => {
+          try { return `${varName}=${JSON.stringify(new URL(path || "/", finalUrl).href)}`; }
+          catch { return match; }
+        }
+      );
+    }
+
+    resHeaders.set("content-type", "text/javascript; charset=utf-8");
+    return new NextResponse(js, { status: res.status, headers: resHeaders });
+  }
+
+  // Binary / everything else — return decompressed buffer directly
+  // .slice() always returns a concrete ArrayBuffer (never SharedArrayBuffer), satisfying BodyInit.
+  const ab = bodyBuf.buffer.slice(bodyBuf.byteOffset, bodyBuf.byteOffset + bodyBuf.byteLength) as ArrayBuffer;
+  return new NextResponse(ab, { status: res.status, headers: resHeaders });
 }
 
-export async function PUT(request: NextRequest) {
-  return handleProxy(request);
+/**
+ * Build the outgoing response headers, stripping blocked ones and cleaning cookies.
+ * Extracted to avoid code duplication between the no-body and body paths.
+ */
+function buildResHeaders(res: Response, cookies: string[]): Headers {
+  const resHeaders = new Headers();
+  for (const [key, value] of res.headers.entries()) {
+    const lk = key.toLowerCase();
+    if (!BLOCKED_RES_HEADERS.has(lk) && lk !== "content-length") resHeaders.set(key, value);
+  }
+  for (const cookie of cookies) {
+    const cleaned = cookie
+      .replace(/;\s*domain=[^;]*/gi, "")
+      .replace(/;\s*secure/gi, "")
+      .replace(/;\s*samesite=[^;]*/gi, "");
+    resHeaders.append("set-cookie", cleaned);
+  }
+  resHeaders.set("access-control-allow-origin", "*");
+  resHeaders.delete("x-frame-options");
+  resHeaders.set("cache-control", "no-store, no-cache, must-revalidate");
+  resHeaders.delete("etag");
+  resHeaders.delete("last-modified");
+  return resHeaders;
 }
 
-export async function PATCH(request: NextRequest) {
-  return handleProxy(request);
-}
-
-export async function DELETE(request: NextRequest) {
-  return handleProxy(request);
-}
-
-export async function HEAD(request: NextRequest) {
-  return handleProxy(request);
-}
-
-export async function OPTIONS(request: NextRequest) {
-  return handleProxy(request);
-}
+// ── Export all HTTP methods ────────────────────────────────────────────────
+export async function GET(req: NextRequest)     { return handleProxy(req); }
+export async function POST(req: NextRequest)    { return handleProxy(req); }
+export async function PUT(req: NextRequest)     { return handleProxy(req); }
+export async function PATCH(req: NextRequest)   { return handleProxy(req); }
+export async function DELETE(req: NextRequest)  { return handleProxy(req); }
+export async function HEAD(req: NextRequest)    { return handleProxy(req); }
+export async function OPTIONS(req: NextRequest) { return handleProxy(req); }

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export const runtime = "nodejs";
+
 /**
  * Intercept all requests that are NOT already going through the proxy
  * and NOT internal Next.js routes.
