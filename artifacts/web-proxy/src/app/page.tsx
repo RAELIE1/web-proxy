@@ -18,7 +18,7 @@ export default function Home() {
     if (!value.startsWith("http://") && !value.startsWith("https://")) {
       value = "https://" + value;
     }
-    window.location.href = `/api/proxy?url=${encodeURIComponent(value)}`;
+    window.location.href = `/proxy?url=${encodeURIComponent(value)}`;
   }
 
   function handleSubmit(e: React.FormEvent) {

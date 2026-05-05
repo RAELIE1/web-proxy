@@ -1,6 +1,6 @@
 import * as cheerio from "cheerio";
 
-export const PROXY_ROUTE = "/api/proxy";
+export const PROXY_ROUTE = "/proxy";
 
 /**
  * Convert any URL (relative or absolute) into a proxy URL.
@@ -142,13 +142,13 @@ function rewriteSrcset(srcset: string, baseUrl: string): string {
 function buildInterceptorScript(baseUrl: string): string {
   return `
 (function() {
-  var PROXY = '/api/proxy?url=';
+  var PROXY = '/proxy?url=';
   var BASE = ${JSON.stringify(baseUrl)};
 
   function proxify(url) {
     if (!url || typeof url !== 'string') return url;
     if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:')) return url;
-    if (url.indexOf('/api/proxy?url=') !== -1) return url;
+    if (url.indexOf('/proxy?url=') !== -1) return url;
     try {
       var abs = new URL(url, BASE).href;
       if (abs.startsWith('http://') || abs.startsWith('https://')) {
