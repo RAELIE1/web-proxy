@@ -243,10 +243,13 @@ function buildInterceptorScript(baseUrl: string): string {
   }
 
   /* ── window.location navigation intercept ── */
-  /* Catch programmatic navigations via location.href = ... */
+  /* Catch full-page navigations: location.href=, location.assign(), location.replace() */
+  /* NOTE: We deliberately do NOT patch history.pushState/replaceState because    */
+  /* that breaks SPA client-side routers (Vue Router, React Router, etc.) which   */
+  /* rely on pushState to update the URL without a page reload. Those routers      */
+  /* would see the proxified URL and fail to match any of their own routes,        */
+  /* rendering a blank page. Fetch/XHR interceptors already handle their requests. */
   try {
-    var _locDesc = Object.getOwnPropertyDescriptor(window, 'location') ||
-                   Object.getOwnPropertyDescriptor(Location.prototype, 'href');
     var _locHrefDesc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
     if (_locHrefDesc && _locHrefDesc.set) {
       Object.defineProperty(Location.prototype, 'href', {
@@ -258,6 +261,16 @@ function buildInterceptorScript(baseUrl: string): string {
         configurable: true
       });
     }
+    var _locAssign = Location.prototype.assign;
+    Location.prototype.assign = function(url) {
+      try { url = proxify(String(url)); } catch(e) {}
+      return _locAssign.call(this, url);
+    };
+    var _locReplace = Location.prototype.replace;
+    Location.prototype.replace = function(url) {
+      try { url = proxify(String(url)); } catch(e) {}
+      return _locReplace.call(this, url);
+    };
   } catch(e) {}
 
   /* ── Worker / importScripts (best-effort) ── */
@@ -279,17 +292,7 @@ function buildInterceptorScript(baseUrl: string): string {
     Object.setPrototypeOf(window.WebSocket, _WS);
   }
 
-  /* ── history.pushState / replaceState ── */
-  var _push = history.pushState.bind(history);
-  history.pushState = function(state, title, url) {
-    try { if (url) url = proxify(String(url)); } catch(e) {}
-    return _push(state, title, url);
-  };
-  var _replace = history.replaceState.bind(history);
-  history.replaceState = function(state, title, url) {
-    try { if (url) url = proxify(String(url)); } catch(e) {}
-    return _replace(state, title, url);
-  };
+
 })();
 `.trim();
 }
