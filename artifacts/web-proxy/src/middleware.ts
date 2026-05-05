@@ -13,9 +13,8 @@ import { NextRequest, NextResponse } from "next/server";
 export function middleware(request: NextRequest) {
   const { pathname, search } = new URL(request.url);
 
-  // Always let through: homepage, proxy handler, Next.js internals, favicon
+  // Always let through: proxy handler, Next.js internals, favicon
   if (
-    pathname === "/" ||
     pathname.startsWith("/proxy") ||
     pathname.startsWith("/_next") ||
     pathname === "/favicon.ico"
@@ -25,6 +24,9 @@ export function middleware(request: NextRequest) {
 
   // ── Strategy 1: recover origin from Referer header ───────────────────────
   // Referer looks like: https://host/proxy?url=https%3A%2F%2Fchess.com%2F...
+  // This catches root-relative navigations FROM proxied pages (including meta
+  // refresh, JS redirects, form submits) regardless of the target pathname,
+  // even "/" — which would otherwise land on our own homepage.
   const referer = request.headers.get("referer");
   if (referer) {
     try {
@@ -40,10 +42,22 @@ export function middleware(request: NextRequest) {
     } catch { /* unparseable, fall through */ }
   }
 
+  // ── Homepage passthrough ──────────────────────────────────────────────────
+  // If no Referer pointed to a proxied page, a request for "/" is a genuine
+  // user navigation to our homepage (address-bar entry, back button, etc.).
+  // Let it through.  We deliberately check this AFTER the Referer strategy so
+  // that a proxied page doing `location.href = "/"` (or a meta-refresh to "/")
+  // still gets redirected to the upstream site's root, not our homepage.
+  if (pathname === "/") {
+    return NextResponse.next();
+  }
+
   // ── Strategy 2: cookie-based fallback ────────────────────────────────────
   // The proxy route sets __proxy_origin on every response so that requests
   // arriving without a Referer (dynamic import(), web workers, importmap
   // entries, etc.) can still be redirected correctly.
+  // We do NOT apply this to "/" so that a user who manually navigates to the
+  // root still sees our homepage rather than an old proxied origin.
   const cookieOrigin = request.cookies.get("__proxy_origin")?.value;
   if (cookieOrigin) {
     try {

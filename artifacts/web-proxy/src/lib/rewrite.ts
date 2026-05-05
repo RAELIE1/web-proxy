@@ -69,6 +69,19 @@ export function rewriteHtml(html: string, baseUrl: string): string {
     if (val) $(el).attr("poster", makeProxyUrl(val, baseUrl));
   });
 
+  // <meta http-equiv="refresh" content="0; url=...">
+  $('meta[http-equiv]').each((_, el) => {
+    const httpEquiv = ($(el).attr('http-equiv') ?? '').toLowerCase();
+    if (httpEquiv === 'refresh') {
+      const content = $(el).attr('content') ?? '';
+      const rewritten = content.replace(
+        /^(\d*\s*;?\s*url=)(.+)$/i,
+        (_, prefix: string, url: string) => prefix + makeProxyUrl(url.trim(), baseUrl)
+      );
+      $(el).attr('content', rewritten);
+    }
+  });
+
   // data-src / data-href (lazy-load patterns)
   $("[data-src]").each((_, el) => {
     const val = $(el).attr("data-src");
