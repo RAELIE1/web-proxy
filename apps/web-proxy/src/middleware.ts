@@ -15,11 +15,16 @@ export const runtime = "nodejs";
 export function middleware(request: NextRequest) {
   const { pathname, search } = new URL(request.url);
 
-  // Always let through: proxy handler, Next.js internals, favicon
+  // Always let through: proxy handler, Next.js internals, and all
+  // public static assets (GIFs, images, icons, etc. served from /public).
+  // Without this, the cookie-based fallback would route e.g. /rem-transparent.gif
+  // through whatever origin is stored in __proxy_origin — which is wrong.
+  const STATIC_EXTS = /\.(gif|png|jpg|jpeg|webp|svg|ico|mp4|woff2?|ttf|otf|css|js|map)$/i;
   if (
     pathname.startsWith("/proxy") ||
     pathname.startsWith("/_next") ||
-    pathname === "/favicon.ico"
+    pathname === "/favicon.ico" ||
+    STATIC_EXTS.test(pathname)
   ) {
     return NextResponse.next();
   }

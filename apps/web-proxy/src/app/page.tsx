@@ -28,87 +28,92 @@ export default function Home() {
 
   return (
     <main className="page">
-      <div className="hero">
-        <div className="logo">
-          <div className="logo-icon">🌐</div>
-          WebProxy
+      <header className="hero">
+        <h1 className="logo">Web Proxy</h1>
+        <p className="tagline">High-performance server-side web interceptor</p>
+      </header>
+
+      <div className="main-content">
+        {/* Left GIF card */}
+        <div className="character-card">
+          <img src="/rem-transparent.gif" alt="Rem" />
         </div>
-        <p className="tagline">
-          Browse any website through the proxy — HTML, CSS, JS, images, fonts,
-          and more.
-        </p>
+
+        {/* Center info card — mirrors Zero Mapper's info-card */}
+        <div className="info-card">
+          <div className="profile-section">
+            <div className="status-badge">
+              <span className="status-dot" />
+              <span>Ready to browse</span>
+            </div>
+
+            <div className="search-card">
+              <span className="search-label">Enter a URL to browse</span>
+
+              <form className="search-row" onSubmit={handleSubmit}>
+                <input
+                  className="url-input"
+                  type="text"
+                  placeholder="https://example.com"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  autoFocus
+                  spellCheck={false}
+                />
+                <button className="go-btn" type="submit">
+                  Browse →
+                </button>
+              </form>
+
+              <div className="examples">
+                <span className="examples-label">Try an example:</span>
+                {EXAMPLES.map((ex) => (
+                  <button
+                    key={ex}
+                    className="example-chip"
+                    onClick={() => navigate(ex)}
+                  >
+                    {ex.replace("https://", "")}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="features">
+            <div className="feature">
+              <div className="feature-icon">🔗</div>
+              <div className="feature-title">Smart Rewriting</div>
+              <div className="feature-desc">
+                Full URL transformation for HTML, CSS, and JS assets.
+              </div>
+            </div>
+            <div className="feature">
+              <div className="feature-icon">⚡</div>
+              <div className="feature-title">Zero-Lag</div>
+              <div className="feature-desc">
+                Optimised Next.js routes for high-speed interception.
+              </div>
+            </div>
+            <div className="feature">
+              <div className="feature-icon">🛡️</div>
+              <div className="feature-title">Privacy Guard</div>
+              <div className="feature-desc">
+                Automatic header stripping and cookie management.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right GIF card */}
+        <div className="character-card">
+          <img src="/agnestachyon.gif" alt="Agnes Tachyon" />
+        </div>
       </div>
 
-      <div className="search-card">
-        <span className="search-label">Enter a URL to browse</span>
-
-        <form className="search-row" onSubmit={handleSubmit}>
-          <input
-            className="url-input"
-            type="text"
-            placeholder="https://example.com"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            autoFocus
-            spellCheck={false}
-          />
-          <button className="go-btn" type="submit">
-            Browse →
-          </button>
-        </form>
-
-        <div className="examples">
-          <span className="examples-label">Try an example:</span>
-          {EXAMPLES.map((ex) => (
-            <button
-              key={ex}
-              className="example-chip"
-              onClick={() => navigate(ex)}
-            >
-              {ex.replace("https://", "")}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="features">
-        <div className="feature">
-          <div className="feature-icon">🔗</div>
-          <div className="feature-title">Full URL Rewriting</div>
-          <div className="feature-desc">
-            href, src, srcset, action, and CSS url() are all rewritten to route
-            through the proxy.
-          </div>
-        </div>
-        <div className="feature">
-          <div className="feature-icon">⚡</div>
-          <div className="feature-title">Runtime Interception</div>
-          <div className="feature-desc">
-            fetch() and XMLHttpRequest are intercepted so dynamic requests also
-            go through the proxy.
-          </div>
-        </div>
-        <div className="feature">
-          <div className="feature-icon">📦</div>
-          <div className="feature-title">All Asset Types</div>
-          <div className="feature-desc">
-            HTML, CSS, JS, images, fonts, JSON — all proxied with correct
-            content-type headers.
-          </div>
-        </div>
-        <div className="feature">
-          <div className="feature-icon">🍪</div>
-          <div className="feature-title">Cookie Forwarding</div>
-          <div className="feature-desc">
-            Request and response cookies are forwarded as faithfully as the
-            same-origin policy allows.
-          </div>
-        </div>
-      </div>
-
-      <p className="footer">
-        Powered by Next.js · Deploy to Vercel for best performance
-      </p>
+      <footer className="footer">
+        Powered by Next.js · <a href="https://github.com/RAELIE1/web-proxy/tree/main/apps/web-proxy" target="_blank" rel="noopener noreferrer" className="footer-link">GitHub</a>
+      </footer>
     </main>
   );
 }
