@@ -32,10 +32,12 @@ export function middleware(request: NextRequest) {
   // ── Strategy 1: recover origin from Referer header ───────────────────────
   // Referer looks like: https://host/proxy?url=https%3A%2F%2Fchess.com%2F...
   // This catches root-relative navigations FROM proxied pages (including meta
-  // refresh, JS redirects, form submits) regardless of the target pathname,
-  // even "/" — which would otherwise land on our own homepage.
+  // refresh, JS redirects, form submits) regardless of the target pathname.
+  // Exception: if the user is navigating to "/" we let it through — that means
+  // they clicked "Back to proxy home" (e.g. from an error page) and should
+  // reach the homepage, not be bounced back into the proxy.
   const referer = request.headers.get("referer");
-  if (referer) {
+  if (referer && pathname !== "/") {
     try {
       const proxiedUrl = new URL(referer).searchParams.get("url");
       if (proxiedUrl) {

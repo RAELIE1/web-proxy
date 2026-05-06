@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 const EXAMPLES = [
   "https://example.com",
@@ -11,6 +11,31 @@ const EXAMPLES = [
 
 export default function Home() {
   const [url, setUrl] = useState("");
+  const [status, setStatus] = useState<"checking" | "online" | "offline">("checking");
+  const [lightbox, setLightbox] = useState(false);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    async function checkStatus() {
+      try {
+        const res = await fetch("/proxy?url=https://example.com", { method: "HEAD" });
+        setStatus(res.ok ? "online" : "offline");
+      } catch {
+        setStatus("offline");
+      }
+    }
+    checkStatus();
+  }, []);
+
+  const statusConfig = {
+    checking: { label: "Checking proxy...", color: "var(--text-muted)" },
+    online:   { label: "Ready to browse",  color: "var(--green)" },
+    offline:  { label: "Proxy unavailable", color: "var(--red)" },
+  };
 
   function navigate(target: string) {
     let value = target.trim();
@@ -42,10 +67,28 @@ export default function Home() {
         {/* Center info card — mirrors Zero Mapper's info-card */}
         <div className="info-card">
           <div className="profile-section">
-            <div className="status-badge">
-              <span className="status-dot" />
-              <span>Ready to browse</span>
+            <div className="golden-card" onClick={() => setLightbox(true)}>
+              <img src="/problem.jpg" alt="" className="golden-card-img" />
             </div>
+
+            {lightbox && (
+              <div className="lightbox" onClick={() => setLightbox(false)}>
+                <a
+                  href="https://witchculttranslation.com/2025/06/10/arc-9-chapter-36-problem/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <img src="/problem.jpg" alt="" className="lightbox-img" />
+                </a>
+              </div>
+            )}
+            {mounted && (
+              <div className="status-badge">
+                <span className="status-dot" style={{ background: statusConfig[status].color }} />
+                <span>{statusConfig[status].label}</span>
+              </div>
+            )}
 
             <div className="search-card">
               <span className="search-label">Enter a URL to browse</span>

@@ -132,6 +132,83 @@ header, .hero {
   gap: 0;
 }
 
+/* ── Golden card ─────────────────────────────────────────────────────────── */
+.golden-card {
+  width: 100%;
+  border-radius: var(--radius);
+  border: 2px solid #b8860b;
+  box-shadow: 0 0 0 1px #ffd70033, 0 4px 24px #b8860b55;
+  overflow: hidden;
+  background: #1a1508;
+  position: relative;
+  cursor: pointer;
+}
+
+.golden-card:hover .golden-card-img {
+  filter: brightness(0.55);
+}
+
+.golden-card-hover-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #ffd700;
+  letter-spacing: 0.04em;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.golden-card:hover .golden-card-hover-hint {
+  opacity: 1;
+}
+
+.golden-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, #ffd70022 0%, transparent 60%);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.golden-card-img {
+  width: 100%;
+  display: block;
+  object-fit: cover;
+  max-height: 260px;
+  transition: filter 0.2s ease;
+}
+
+/* ── Lightbox ────────────────────────────────────────────────────────────── */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  cursor: zoom-out;
+  animation: fadeIn 0.15s ease;
+}
+
+.lightbox-img {
+  max-width: 90vw;
+  max-height: 90vh;
+  border-radius: var(--radius);
+  border: 2px solid #b8860b;
+  box-shadow: 0 0 40px #b8860b88;
+  object-fit: contain;
+  cursor: pointer;
+}
+
 /* ── Status badge ────────────────────────────────────────────────────────── */
 .status-badge {
   display: inline-flex;
@@ -151,7 +228,7 @@ header, .hero {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--text-muted);
+  background: var(--green);
   animation: pulse 2s infinite;
 }
 
