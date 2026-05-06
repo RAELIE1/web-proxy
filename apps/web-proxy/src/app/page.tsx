@@ -112,7 +112,7 @@ export default function Home() {
       </div>
 
       <footer className="footer">
-        Powered by Next.js · <a href="https://github.com/RAELIE1/web-proxy/tree/main/apps/web-proxy" target="_blank" rel="noopener noreferrer" className="footer-link">GitHub</a>
+        Powered by Next.js · <a href="https://github.com/RAELIE1/web-proxy" target="_blank" rel="noopener noreferrer" className="footer-link">GitHub</a>
       </footer>
     </main>
   );
